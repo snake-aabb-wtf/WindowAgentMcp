@@ -36,11 +36,12 @@
 - 排除本程序自己的窗口、无标题的普通辅助窗口、已关闭或不可捕捉的窗口。
 - 用户显式选择一行并点击“连接”；提供刷新、断开和重新选择操作。
 - 显示当前绑定窗口和连接状态。MCP 工具不提供 `select_window`，也不接收 HWND 参数。
+- 服务启动时创建隐藏的选择器；`show_window_picker` 显示 GUI，未绑定目标的实际截图/输入请求也会显示 GUI。`initialize`、`tools/list` 和其他元数据查询不显示窗口。
 
 ### MCP stdio 服务
 
 - 在标准输入/输出上承载 MCP JSON-RPC 消息。
-- `stdout` 只写 MCP 协议消息，诊断日志只写 `stderr`。
+- `stdout` 只写 MCP 协议消息，诊断日志写到 `stderr` 与本地诊断目录。
 - 工具请求在单一目标的输入队列中串行执行，避免并发请求交错发送按键和鼠标事件。
 - 客户端断开或标准输入关闭时，释放输入状态并清理捕捉会话。
 
@@ -75,8 +76,8 @@ stateDiagram-v2
     已连接 --> [*]: MCP 客户端关闭并清理资源
 ```
 
-1. MCP 客户端启动本地服务进程；进程显示窗口选择器并开始处理 stdio。
-2. 用户在选择器中选定窗口并连接。没有绑定窗口时，截图和输入工具返回 `no_window_selected`。
+1. MCP 客户端启动本地服务进程；进程创建隐藏的窗口选择器并开始处理 stdio，元数据发现不会弹窗。
+2. Agent 调用 `show_window_picker`，用户在本地选择器中选定窗口并连接。没有绑定窗口时，截图和输入工具也会显示选择器并返回 `no_window_selected`，不会发送目标输入。
 3. Agent 调用 `screenshot`。服务取得当前捕捉帧，返回 PNG 与客户区宽高。
 4. Agent 根据图像调用鼠标或键盘工具。输入坐标按 PNG 像素解释。
 5. Agent 可再次调用 `screenshot` 检查应用变化，继续循环。
@@ -90,6 +91,7 @@ stateDiagram-v2
 
 | 工具 | 参数与行为 | 返回 |
 | --- | --- | --- |
+| `show_window_picker` | 无参数；显示本地人工选择器，不自动绑定或切换目标 | 提示用户选择窗口并连接 |
 | `screenshot` | 无参数；捕捉当前绑定窗口 | MCP 图像内容 PNG，另含目标标题、宽度、高度和 `client-px` 坐标说明 |
 | `move_mouse` | `x`, `y`, 可选 `duration_ms`（默认 0，范围 0–5000）；正值时直线插值移动 | 输入是否已发送及目标坐标 |
 | `click` | `x`, `y`, `button: left\|right`, 可选 `click_count: 1\|2` | 输入是否已发送 |
@@ -124,8 +126,13 @@ stateDiagram-v2
 - `focus_failed`：不能把绑定窗口置于前台；不发送输入。
 - `input_incomplete`：Win32 返回的已发送输入数不完整；清理按住状态，不自动重试动作。
 - `out_of_bounds`：坐标超出当前客户区尺寸。
-- `invalid_key` / `invalid_button`：键或鼠标按钮名称不受支持。
+- `stale_coordinates`：窗口尺寸或 DPI 已变化；重新截图后再操作。
+- `invalid_key` / `invalid_button` / `invalid_argument`：键、按钮或参数不受支持。
+- `state_error`：按住/释放状态与服务记录不一致。
+- `unsupported_shortcut`：系统快捷键或应用切换组合被拒绝。
+- `input_failed`：Windows 未执行指针或输入请求。
 - `request_cancelled`：请求取消；拖动按取消清理路径尝试释放。
+- `internal_error`：未预期的操作错误，不向 MCP 客户端泄露异常细节。
 
 `SendInput` 可能因 UIPI 而无法向更高完整性级别进程注入输入；Windows 不保证返回值能够指出 UIPI 是失败原因。程序不自动提权；它报告输入失败，并指导用户让本程序与目标以兼容的权限级别运行。[Microsoft SendInput 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
 
@@ -134,21 +141,21 @@ stateDiagram-v2
 - 每个 MCP 进程只维护一个由本地用户选定的窗口。
 - MCP 客户端不能传入或更改 HWND；选择器是本地人工绑定点。
 - 所有输入事件通过 Windows 全局输入流发送。服务每次输入前激活并检查目标窗口，但 Windows 不提供 `SendInput` 的 HWND 级硬隔离，因此无法消除检查与系统焦点变化之间的竞态。
-- 工具输入日志只记录操作类别、目标 PID、坐标（如适用）和错误码，不记录文本内容或截图。
+- 诊断日志记录进程 PID、生命周期、选择器显示请求和异常，不记录工具参数、文本内容或截图。文件名加入启动时间以区分 PID 复用。
 - 截图仅作为 MCP 图像响应返回，不默认持久化到磁盘。
 - Agent 对选中应用的破坏性操作由用户选择目标窗口并启用 Agent 工具这一事实明确授权；程序不替 Agent 判断应用内容。
 
 ## 10. 平台与兼容性
 
 - 目标平台：Windows 桌面。
-- 窗口定向捕捉使用 `IGraphicsCaptureItemInterop::CreateForWindow`，最低支持 Windows 10 版本 1903（Build 18362）；更早系统不在第一版范围内。[API 最低版本](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow)
+- 最低支持 Windows 10 版本 1903（Build 18362），对应 `net10.0-windows10.0.18362.0` 目标平台。`IGraphicsCaptureItemInterop::CreateForWindow` 从该版本开始提供。[API 最低版本](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow)
 - 窗口必须允许系统捕捉。DRM 内容、安全桌面和受系统保护的表面可能无法捕捉；捕捉 API 不可用时返回错误。
 - 单独弹出的原生对话框可能需要用户在选择器中重新选为目标窗口。第一版不跟踪同一进程创建的其他顶层窗口。
 - 文本工具发送 Unicode 键盘输入，不承诺完整复现输入法的组合编辑过程；IME 特定流程可通过 `key_down`、`key_up` 和后续截图协作。
 
 ## 11. 验收标准
 
-1. 在 MCP 客户端配置本地 stdio 服务后，启动服务会显示可操作的窗口选择器。
+1. 在 MCP 客户端配置本地 stdio 服务后，启动和工具发现不显示选择器；调用 `show_window_picker`，或在无目标时调用截图/输入工具，会显示可操作的本地选择器。
 2. 选择窗口并连接后，`screenshot` 返回所选窗口内容而非选择器或其他窗口，并报告准确尺寸。
 3. Agent 可完成左键/右键单击、双击、按下/释放长按、拖动、滚轮、Unicode 文本、命名按键与组合键。
 4. 坐标越界时不发送输入；窗口尺寸改变后能返回新尺寸并允许 Agent 使用新截图坐标继续操作。
