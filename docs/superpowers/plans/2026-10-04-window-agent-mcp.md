@@ -235,5 +235,8 @@ Codex `mcpServerStatus/list` creates and disposes temporary MCP connections. Sho
 - [x] Add an MIT license and update README badges, repository links, and release/install instructions after determining the GitHub account.
 - [x] Configure this repository with the account's ID-based `noreply` commit address and update the unpublished commit metadata without changing its content or messages.
 - [x] Run local build and tests; review all staged paths and scan staged text for credentials before the first public push.
-- [ ] Create a public `WindowAgentMcp` repository with GitHub CLI, push `main`, and push tag `v0.1.0`.
-- [ ] Confirm the GitHub Actions run succeeds and the release contains the executable.
+- [x] Create a public `WindowAgentMcp` repository with GitHub CLI and push `main`.
+- [x] Push the annotated `v0.1.0` tag.
+- [x] Confirm the GitHub Actions CI succeeds and the published release contains the executable.
+
+**Execution Status (2026-10-04):** Public repository: `https://github.com/snake-aabb-wtf/WindowAgentMcp`. The main-branch Windows CI run and tag-triggered release workflow both succeeded. GitHub Release `v0.1.0` is published with `WindowAgentMcp.exe` attached.
